@@ -3,6 +3,48 @@ import path from "node:path";
 import process from "node:process";
 import exifr from "exifr";
 
+async function callLlm(prompt: string): Promise<string> {
+  const apiKey = process.env.OPENAI_API_KEY || process.env.LLM_API_KEY;
+  const apiEndpoint = process.env.LLM_API_ENDPOINT || "https://api.openai.com/v1/chat/completions";
+  const model = process.env.LLM_MODEL || "gpt-4o-mini";
+
+  if (!apiKey) {
+    console.error("Error: OPENAI_API_KEY or LLM_API_KEY environment variable is not set");
+    process.exit(1);
+  }
+
+  const messages = [
+    { role: "system", content: "你是一个历史事件提取专家。请根据用户描述，提取出一系列有序的时间线事件。返回格式是严格的JSON数组，不要有任何额外解释。" },
+    { role: "user", content: prompt },
+  ];
+
+  try {
+    const response = await fetch(apiEndpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        temperature: 0.3,
+        response_format: { type: "json_object" },
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`LLM API request failed: ${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    return data.choices[0].message.content;
+  } catch (error) {
+    console.error(`Error calling LLM: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
+}
+
 interface TimelineEvent {
   start_date: {
     year: number;
@@ -292,25 +334,56 @@ function extractEventsFromContent(content: string, sourceUrl: string): TimelineE
   return events;
 }
 
-async function processFile(filepath: string): Promise<TimelineEvent[]> {
+interface LlmPendingEvent {
+  type: 'llm_pending';
+  prompt: string;
+}
+
+function isLlmPendingEvent(event: TimelineEvent | LlmPendingEvent): event is LlmPendingEvent {
+  return (event as LlmPendingEvent).type === 'llm_pending';
+}
+
+async function processFile(filepath: string): Promise<(TimelineEvent | LlmPendingEvent)[]> {
   const filename = path.basename(filepath);
   const fileUrl = `file:///${filepath.replace(/\\/g, "/")}`;
 
   if (isTextFile(filepath)) {
     try {
       let content = fs.readFileSync(filepath, "utf-8");
-      // Strip HTML tags for HTML files before pattern matching
       const ext = path.extname(filepath).toLowerCase();
       if (ext === ".html" || ext === ".htm") {
         content = stripHtml(content);
       }
-      // Try to extract date-based events from content
-      const extracted = extractEventsFromContent(content, fileUrl);
-      if (extracted.length > 0) return extracted;
 
-      // No extractable time events — skip this file entirely.
-      // Timeline requires at least a time + event; location-only data is not included.
-      return [];
+      const llmPrompt = `请从以下文本中提取时间线事件。
+
+要求：
+1. 识别所有具有时间信息的事件
+2. 每个事件包含：年份、月份（可选）、日期（可选）、标题、描述
+3. 如果有持续时间，提供开始和结束时间
+
+返回格式：
+{
+  "events": [
+    {
+      "year": 年份,
+      "month": 月份（可选）,
+      "day": 日（可选）,
+      "end_year": 结束年份（可选）,
+      "end_month": 结束月份（可选）,
+      "end_day": 结束日（可选）,
+      "headline": "事件标题",
+      "text": "事件描述"
+    }
+  ]
+}
+
+文本内容：
+---
+${content.slice(0, 3000)}
+---`;
+
+      return [{ type: 'llm_pending', prompt: llmPrompt }];
     } catch {
       return [];
     }
@@ -354,8 +427,8 @@ async function processFile(filepath: string): Promise<TimelineEvent[]> {
   }];
 }
 
-async function processInput(inputPath: string): Promise<TimelineEvent[]> {
-  const events: TimelineEvent[] = [];
+async function processInput(inputPath: string): Promise<(TimelineEvent | LlmPendingEvent)[]> {
+  const events: (TimelineEvent | LlmPendingEvent)[] = [];
 
   if (fs.existsSync(inputPath)) {
     if (fs.statSync(inputPath).isDirectory()) {
@@ -439,21 +512,65 @@ async function main(): Promise<void> {
     }
   }
 
+  const allEvents: TimelineEvent[] = [];
+
   if (prompt) {
-    const instructions = {
-      needsLlmExtraction: true,
-      prompt: `请根据用户描述"${prompt}"，提取出一系列有序的时间线事件。\n请返回一个 JSON 数组，每个元素包含：\n{\n  "year": 年份(数字),\n  "month": 月份(数字，可选),\n  "day": 日(数字，可选),\n  "end_year": 结束年份(数字，可选),\n  "headline": "事件标题(120字内)",\n  "text": "事件描述(500字内)"\n}\n请直接返回 JSON，不要多余的解释。`,
-    };
-    console.error(JSON.stringify(instructions, null, 2));
-    process.exit(1);
+    const llmPrompt = `请根据用户描述"${prompt}"，提取出一系列有序的时间线事件。
+请返回一个 JSON 对象，格式如下：
+{
+  "events": [
+    {
+      "year": 年份(数字),
+      "month": 月份(数字，可选),
+      "day": 日(数字，可选),
+      "end_year": 结束年份(数字，可选),
+      "end_month": 结束月份(数字，可选),
+      "end_day": 结束日(数字，可选),
+      "headline": "事件标题(120字内)",
+      "text": "事件描述(500字内)"
+    }
+  ]
+}
+请直接返回 JSON，不要任何多余的解释。`;
+
+    const apiKey = process.env.OPENAI_API_KEY || process.env.LLM_API_KEY;
+    
+    if (apiKey) {
+      console.error(`正在调用 LLM 解析提示词: ${prompt}`);
+      const llmResponse = await callLlm(llmPrompt);
+      
+      try {
+        const result = JSON.parse(llmResponse);
+        const llmEvents = result.events || result;
+        
+        for (const ev of llmEvents) {
+          const event: TimelineEvent = {
+            start_date: { year: ev.year, month: ev.month ?? undefined, day: ev.day ?? undefined },
+            text: { headline: ev.headline, text: ev.text },
+          };
+          if (ev.end_year) {
+            event.end_date = { year: ev.end_year, month: ev.end_month ?? undefined, day: ev.end_day ?? undefined };
+          }
+          allEvents.push(event);
+        }
+      } catch (e) {
+        console.error(`Error: Failed to parse LLM response: ${e}`);
+        process.exit(1);
+      }
+    } else {
+      const instructions = {
+        needsLlmExtraction: true,
+        prompt: llmPrompt,
+      };
+      console.error(JSON.stringify(instructions, null, 2));
+      process.exit(1);
+    }
   }
 
-  if (inputPaths.length === 0 && !llmEventsJson) {
+  if (inputPaths.length === 0 && !llmEventsJson && !prompt) {
     console.error("Error: No input specified");
     printUsage(1);
   }
-
-  const allEvents: TimelineEvent[] = [];
 
   // Parse externally extracted events if provided (e.g., from LLM)
   if (llmEventsJson) {
@@ -479,19 +596,33 @@ async function main(): Promise<void> {
     }
   }
 
+  const allEventsWithPending: (TimelineEvent | LlmPendingEvent)[] = [...allEvents];
+
   for (const inputPath of inputPaths) {
-    // Resolve relative paths against current working directory
     const resolved = path.isAbsolute(inputPath) ? inputPath : path.resolve(process.cwd(), inputPath);
-    allEvents.push(...await processInput(resolved));
+    allEventsWithPending.push(...await processInput(resolved));
   }
 
-  if (allEvents.length === 0) {
+  const llmPendingEvents = allEventsWithPending.filter(isLlmPendingEvent);
+  
+  if (llmPendingEvents.length > 0) {
+    const instructions = {
+      needsLlmExtraction: true,
+      prompt: llmPendingEvents.map(e => e.prompt).join("\n\n---\n\n"),
+    };
+    console.error(JSON.stringify(instructions, null, 2));
+    process.exit(1);
+  }
+
+  const finalEvents = allEventsWithPending.filter((e): e is TimelineEvent => !isLlmPendingEvent(e));
+
+  if (finalEvents.length === 0) {
     console.error("Error: No extractable time events found in input files. Timeline requires at least a time + event.");
     process.exit(1);
   }
 
   // Sort all events by date
-  allEvents.sort((a, b) => {
+  finalEvents.sort((a, b) => {
     const aYear = a.start_date.year;
     const bYear = b.start_date.year;
     if (aYear !== bYear) return aYear - bYear;
@@ -503,13 +634,13 @@ async function main(): Promise<void> {
     return aDay - bDay;
   });
 
-  generateTimelineHtml(allEvents, outputPath, title);
+  generateTimelineHtml(finalEvents, outputPath, title);
 
   console.log(JSON.stringify({
     success: true,
     message: "时间线已生成",
     outputPath: path.resolve(outputPath),
-    eventsCount: allEvents.length,
+    eventsCount: finalEvents.length,
   }, null, 2));
 }
 

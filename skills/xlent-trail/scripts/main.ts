@@ -3,6 +3,48 @@ import path from "node:path";
 import process from "node:process";
 import exifr from "exifr";
 
+async function callLlm(prompt: string): Promise<string> {
+  const apiKey = process.env.OPENAI_API_KEY || process.env.LLM_API_KEY;
+  const apiEndpoint = process.env.LLM_API_ENDPOINT || "https://api.openai.com/v1/chat/completions";
+  const model = process.env.LLM_MODEL || "gpt-4o-mini";
+
+  if (!apiKey) {
+    console.error("Error: OPENAI_API_KEY or LLM_API_KEY environment variable is not set");
+    process.exit(1);
+  }
+
+  const messages = [
+    { role: "system", content: "你是一个地理信息提取专家。请根据用户描述，提取出一系列有序地点及其时间信息。返回格式是严格的JSON数组，不要有任何额外解释。" },
+    { role: "user", content: prompt },
+  ];
+
+  try {
+    const response = await fetch(apiEndpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        temperature: 0.3,
+        response_format: { type: "json_object" },
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`LLM API request failed: ${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    return data.choices[0].message.content;
+  } catch (error) {
+    console.error(`Error calling LLM: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
+}
+
 interface Point {
   filename: string;
   latitude: number | null;
@@ -1465,36 +1507,7 @@ function processTextFile(filepath: string, textContent: string): Point[] {
   const metadata = getFileMetadata(filepath);
   const fileUrl = `file:///${filepath.replace(/\\/g, "/")}`;
   
-  const extractResult = extractPlacesFromText(textContent, filepath);
-  
-  const MIN_TIME_INTERVAL_MS = 10 * 60 * 1000;
-  let currentTime = new Date(metadata.created).getTime();
-  
-  const points: Point[] = [];
-  
-  if (extractResult.places.length > 0) {
-    for (let i = 0; i < extractResult.places.length; i++) {
-      const place = extractResult.places[i];
-      let timeStr: string;
-      
-      if (extractResult.hasTime && place.time) {
-        timeStr = place.time;
-      } else {
-        timeStr = new Date(currentTime).toISOString().slice(0, 19).replace("T", " ");
-        currentTime += MIN_TIME_INTERVAL_MS;
-      }
-      
-      points.push({
-        filename: extractResult.places.length > 1 ? `${filename} - ${place.name}` : filename,
-        latitude: place.latitude,
-        longitude: place.longitude,
-        time: timeStr,
-        sourceUrl: fileUrl,
-        description: `地名: ${place.name}`,
-      });
-    }
-  } else {
-    const llmPrompt = `请从以下文本中提取所有地名/地点信息。
+  const llmPrompt = `请从以下文本中提取所有地名/地点信息。
 
 要求：
 1. 按文本出现顺序列出所有地名
@@ -1502,22 +1515,32 @@ function processTextFile(filepath: string, textContent: string): Point[] {
 3. 如果文本中没有时间信息，使用基础时间：${metadata.created}，并按出现顺序每处递增10分钟
 4. 为每个地名提供经纬度坐标
 
+返回格式：
+{
+  "route": [
+    {
+      "name": "地点名称",
+      "description": "描述",
+      "latitude": 纬度,
+      "longitude": 经度,
+      "time": "时间"
+    }
+  ]
+}
+
 文本内容：
 ---
-${textContent}
+${textContent.slice(0, 3000)}
 ---`;
 
-    points.push({
-      filename,
-      latitude: null,
-      longitude: null,
-      time: metadata.created,
-      sourceUrl: fileUrl,
-      description: `文本文件 - 需要LLM解析地点信息。提示词：\n${llmPrompt}`,
-    });
-  }
-  
-  return points;
+  return [{
+    filename,
+    latitude: null,
+    longitude: null,
+    time: metadata.created,
+    sourceUrl: fileUrl,
+    description: llmPrompt,
+  }];
 }
 
 async function processFile(filepath: string): Promise<Point[]> {
@@ -1679,17 +1702,61 @@ async function main(): Promise<void> {
     }
   }
   
-  if (prompt) {
-    const instructions = {
-      needsLlmExtraction: true,
-      prompt: `请根据用户描述"${prompt}"，提取出一系列有序地点及其时间信息。\n请返回一个 JSON 数组，每个元素包含：\n{\n  "name": "地点名称",\n  "description": "该地点的简短描述（50字内）",\n  "latitude": 纬度(数字),\n  "longitude": 经度(数字),\n  "time": "时间描述，如 YYYY-MM-DD HH:MM"\n}\n请确保经纬度是准确的真实坐标。\n请直接返回 JSON，不要多余的解释。`,
-    };
-    console.error(JSON.stringify(instructions, null, 2));
-    process.exit(1);
-  }
-  
   // Load externally provided events
   const externalPoints: Point[] = [];
+
+  if (prompt) {
+    const llmPrompt = `请根据用户描述"${prompt}"，提取出一系列有序地点及其时间信息。
+请返回一个 JSON 对象，格式如下：
+{
+  "route": [
+    {
+      "name": "地点名称",
+      "description": "该地点的简短描述（50字内）",
+      "latitude": 纬度(数字),
+      "longitude": 经度(数字),
+      "time": "时间描述，如 YYYY-MM-DD HH:MM"
+    }
+  ]
+}
+请确保经纬度是准确的真实坐标。
+请直接返回 JSON，不要任何多余的解释。`;
+
+    const apiKey = process.env.OPENAI_API_KEY || process.env.LLM_API_KEY;
+    
+    if (apiKey) {
+      console.error(`正在调用 LLM 解析提示词: ${prompt}`);
+      const llmResponse = await callLlm(llmPrompt);
+      
+      try {
+        const result = JSON.parse(llmResponse);
+        const route = result.route || result;
+        
+        for (const ev of route) {
+          externalPoints.push({
+            filename: ev.name,
+            description: ev.description || "",
+            latitude: ev.latitude,
+            longitude: ev.longitude,
+            time: ev.time || "",
+            imageUrl: null,
+            videoUrl: null,
+            sourceUrl: null,
+          });
+        }
+      } catch (e) {
+        console.error(`Error: Failed to parse LLM response: ${e}`);
+        process.exit(1);
+      }
+    } else {
+      const instructions = {
+        needsLlmExtraction: true,
+        prompt: llmPrompt,
+      };
+      console.error(JSON.stringify(instructions, null, 2));
+      process.exit(1);
+    }
+  }
   if (eventsFile) {
     try {
       const events = JSON.parse(fs.readFileSync(eventsFile, "utf-8")) as Array<{
@@ -1724,6 +1791,17 @@ async function main(): Promise<void> {
   }
   if (points.length === 0) {
     console.error("Error: No files found or processed");
+    process.exit(1);
+  }
+  
+  const needsLlmPoints = points.filter(p => p.latitude === null && p.longitude === null && p.description);
+  
+  if (needsLlmPoints.length > 0) {
+    const instructions = {
+      needsLlmExtraction: true,
+      prompt: needsLlmPoints.map(p => p.description).join("\n\n---\n\n"),
+    };
+    console.error(JSON.stringify(instructions, null, 2));
     process.exit(1);
   }
   
