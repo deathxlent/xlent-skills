@@ -1559,9 +1559,13 @@ async function processFile(filepath: string): Promise<Point[]> {
         longitude = tags.longitude;
       }
     } catch {
-      // EXIF read failed, fall through without GPS
+      // EXIF read failed
     }
-    // Get earliest time from EXIF + fs metadata
+    
+    if (latitude === null || longitude === null) {
+      return [];
+    }
+    
     time = await getEarliestFileTime(filepath);
     return [{
       filename,
@@ -1585,9 +1589,13 @@ async function processFile(filepath: string): Promise<Point[]> {
         longitude = tags.longitude;
       }
     } catch {
-      // EXIF read failed, fall through without GPS
+      // EXIF read failed
     }
-    // Get earliest time from EXIF + fs metadata
+    
+    if (latitude === null || longitude === null) {
+      return [];
+    }
+    
     time = await getEarliestFileTime(filepath);
     return [{
       filename,
@@ -1785,21 +1793,30 @@ async function main(): Promise<void> {
     printUsage(1);
   }
   
-  const points = externalPoints;
+  const points: Point[] = [...externalPoints];
+  const llmPrompts: string[] = [];
+  
   if (inputPath) {
-    points.push(...await processInput(inputPath));
+    const inputPoints = await processInput(inputPath);
+    for (const p of inputPoints) {
+      if (p.latitude === null && p.longitude === null && p.description) {
+        llmPrompts.push(p.description);
+      } else {
+        points.push(p);
+      }
+    }
   }
-  if (points.length === 0) {
+  
+  if (points.length === 0 && llmPrompts.length === 0) {
     console.error("Error: No files found or processed");
     process.exit(1);
   }
   
-  const needsLlmPoints = points.filter(p => p.latitude === null && p.longitude === null && p.description);
-  
-  if (needsLlmPoints.length > 0) {
+  if (llmPrompts.length > 0) {
     const instructions = {
       needsLlmExtraction: true,
-      prompt: needsLlmPoints.map(p => p.description).join("\n\n---\n\n"),
+      prompt: llmPrompts.join("\n\n---\n\n"),
+      inputPath,
     };
     console.error(JSON.stringify(instructions, null, 2));
     process.exit(1);

@@ -596,25 +596,30 @@ async function main(): Promise<void> {
     }
   }
 
-  const allEventsWithPending: (TimelineEvent | LlmPendingEvent)[] = [...allEvents];
+  const finalEvents: TimelineEvent[] = [...allEvents];
+  const llmPrompts: string[] = [];
 
   for (const inputPath of inputPaths) {
     const resolved = path.isAbsolute(inputPath) ? inputPath : path.resolve(process.cwd(), inputPath);
-    allEventsWithPending.push(...await processInput(resolved));
+    const inputEvents = await processInput(resolved);
+    for (const e of inputEvents) {
+      if (isLlmPendingEvent(e)) {
+        llmPrompts.push(e.prompt);
+      } else {
+        finalEvents.push(e);
+      }
+    }
   }
 
-  const llmPendingEvents = allEventsWithPending.filter(isLlmPendingEvent);
-  
-  if (llmPendingEvents.length > 0) {
+  if (llmPrompts.length > 0) {
     const instructions = {
       needsLlmExtraction: true,
-      prompt: llmPendingEvents.map(e => e.prompt).join("\n\n---\n\n"),
+      prompt: llmPrompts.join("\n\n---\n\n"),
+      inputPaths,
     };
     console.error(JSON.stringify(instructions, null, 2));
     process.exit(1);
   }
-
-  const finalEvents = allEventsWithPending.filter((e): e is TimelineEvent => !isLlmPendingEvent(e));
 
   if (finalEvents.length === 0) {
     console.error("Error: No extractable time events found in input files. Timeline requires at least a time + event.");
