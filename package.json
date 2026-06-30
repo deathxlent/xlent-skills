@@ -1,0 +1,23 @@
+{
+  "name": "@xlent/skills",
+  "version": "1.0.0",
+  "description": "Interactive visualization skills — trail map & timeline from files, images, or natural language",
+  "keywords": [
+    "visualization",
+    "map",
+    "timeline",
+    "leaflet",
+    "trail",
+    "exif",
+    "cli"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xlent/xlent-skills.git"
+  },
+  "files": [
+    "skills",
+    "README.md"
+  ]
+}

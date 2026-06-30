@@ -1,0 +1,22 @@
+{
+  "name": "xlent-skills",
+  "owner": {
+    "name": "xlent"
+  },
+  "metadata": {
+    "description": "Timeline and Trail visualization skills for xlent",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "xlent-skills",
+      "description": "Visualization tools: Timeline and Trail (map route) generation",
+      "source": "./",
+      "strict": false,
+      "skills": [
+        "./skills/xlent-timeline",
+        "./skills/xlent-trail"
+      ]
+    }
+  ]
+}

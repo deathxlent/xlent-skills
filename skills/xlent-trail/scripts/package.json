@@ -1,0 +1,14 @@
+{
+  "name": "xlent-trail",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "bun main.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.1"
+  },
+  "dependencies": {
+    "exifr": "^7.1.3"
+  }
+}

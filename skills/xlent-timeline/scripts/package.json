@@ -1,0 +1,11 @@
+{
+  "name": "xlent-timeline",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "bun main.ts"
+  },
+  "dependencies": {
+    "exifr": "^7.1.3"
+  }
+}
